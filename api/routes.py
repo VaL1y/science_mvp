@@ -9,10 +9,22 @@ from schemas import (
     LiteratureBlock,
 )
 from config import settings
-
+from services.search import fetch_arxiv_monthly_corpus
+from services.analysis import (
+    load_corpus,
+    compute_top_terms,
+    compute_emerging_terms,
+)
 
 router = APIRouter()
 
+import os
+import re
+
+def _safe_name(s: str) -> str:
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9_\-]+", "_", s)
+    return s[:80] or "query"
 
 def generate_mock_analysis(query: str) -> AnalyzeResponse:
     mock_stats = AnalysisStatistics(
@@ -70,13 +82,37 @@ def generate_mock_analysis(query: str) -> AnalyzeResponse:
         literature=mock_literature,
     )
 
-
 @router.post("/analyze", response_model=AnalyzeResponse)
 def analyze_topic(request: AnalyzeRequest):
-    years = request.years or settings.DEFAULT_YEARS
-    limit = request.limit or settings.DEFAULT_LIMIT
 
-    return generate_mock_analysis(request.query)
+    years = request.years or settings.DEFAULT_YEARS
+
+    result = fetch_arxiv_monthly_corpus(
+        query=request.query,
+        years=years,
+        max_per_month=300,
+    )
+
+    papers = load_corpus(result["file_path"])
+
+    top_terms = compute_top_terms(papers, top_n=20)
+    emerging_terms = compute_emerging_terms(papers, recent_years=2, top_n=10)
+
+    stats = AnalysisStatistics(
+        total_papers=result["total"],
+        yearly_counts=result["yearly_counts"],
+        top_terms=top_terms,
+        growing_terms=emerging_terms,
+    )
+
+    return AnalyzeResponse(
+        query=request.query,
+        summary=f"Corpus saved to {result['file_path']}",
+        statistics=stats,
+        clusters=[],
+        literature=LiteratureBlock(basic=[], review=[], advanced=[]),
+    )
+
 
 
 @router.post("/compare", response_model=CompareResponse)
