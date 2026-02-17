@@ -1,7 +1,10 @@
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 
-
+class ClusterInfo(BaseModel):
+    cluster_id: int
+    size: int
+    top_terms: List[str]
 # ===== Requests =====
 
 class AnalyzeRequest(BaseModel):
@@ -38,15 +41,20 @@ class LiteratureBlock(BaseModel):
 class AnalysisStatistics(BaseModel):
     total_papers: int
     yearly_counts: Dict[int, int]
-    top_terms: List[str]
-    growing_terms: List[str]
+
+
+class TopicCluster(BaseModel):
+    topic_id: int
+    size: int
+    representative_titles: List[str]
 
 
 class AnalyzeResponse(BaseModel):
     query: str
     summary: str
     statistics: AnalysisStatistics
-    clusters: List[str]
+    topics: List[TopicCluster]
+    emerging_topics: List[TopicCluster]
     literature: LiteratureBlock
 
 

@@ -1,23 +1,16 @@
 import json
-import re
-from collections import Counter, defaultdict
 from typing import List, Dict
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+import matplotlib.pyplot as plt
+from pathlib import Path
+import datetime
 
 
-STOP_WORDS = {
-    "the", "a", "an", "and", "or", "of", "in", "on", "for",
-    "to", "with", "using", "based", "from", "via",
-    "approach", "method", "analysis", "study",
-    "new", "towards", "framework",
-}
-
-
-def tokenize(text: str) -> List[str]:
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9\s\-]", " ", text)
-    tokens = text.split()
-    tokens = [t for t in tokens if len(t) > 2 and t not in STOP_WORDS]
-    return tokens
+# ===============================
+# Loading
+# ===============================
 
 def load_corpus(path: str) -> List[Dict]:
     papers = []
@@ -26,55 +19,136 @@ def load_corpus(path: str) -> List[Dict]:
             papers.append(json.loads(line))
     return papers
 
-def compute_top_terms(papers: List[Dict], top_n: int = 20) -> List[str]:
-    counter = Counter()
 
-    for p in papers:
-        tokens = tokenize(p["title"])
-        counter.update(tokens)
+# ===============================
+# Plot monthly trend
+# ===============================
 
-    return [term for term, _ in counter.most_common(top_n)]
+def plot_monthly_trend(monthly_counts: dict, query: str) -> str:
+    if not monthly_counts:
+        return ""
 
-def compute_emerging_terms(
-    papers: List[Dict],
-    recent_years: int = 2,
-    top_n: int = 10,
-) -> List[str]:
+    dates = []
+    values = []
+
+    for year in sorted(monthly_counts.keys()):
+        for month in sorted(monthly_counts[year].keys()):
+            dates.append(datetime.date(year, month, 1))
+            values.append(monthly_counts[year][month])
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(dates, values, marker="o")
+    plt.title(f"Monthly Publication Trend: {query}")
+    plt.xlabel("Month")
+    plt.ylabel("Number of Papers")
+    plt.xticks(rotation=45)
+    plt.grid(True)
+
+    Path("data").mkdir(exist_ok=True)
+    file_path = f"data/monthly_trend_{query.replace(' ', '_')}.png"
+    plt.tight_layout()
+    plt.savefig(file_path)
+    plt.close()
+
+    return file_path
+
+
+# ===============================
+# Semantic clustering
+# ===============================
+
+_model = None
+
+
+def get_embedding_model():
+    global _model
+    if _model is None:
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _model
+
+
+def compute_topics(papers: List[Dict], n_clusters: int = 4):
+
+    if len(papers) < n_clusters:
+        return []
+
+    model = get_embedding_model()
+
+    texts = [p["title"] for p in papers if p.get("title")]
+
+    if not texts:
+        return []
+
+    embeddings = model.encode(texts, show_progress_bar=False)
+
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    labels = kmeans.fit_predict(embeddings)
+
+    clusters = {}
+    for idx, label in enumerate(labels):
+        clusters.setdefault(label, []).append((texts[idx], embeddings[idx]))
+
+    results = []
+
+    for topic_id, items in clusters.items():
+
+        titles = [t for t, _ in items]
+        embs = np.array([e for _, e in items])
+
+        centroid = embs.mean(axis=0)
+        distances = np.linalg.norm(embs - centroid, axis=1)
+        closest_idx = distances.argsort()[:3]
+
+        representative_titles = [titles[i] for i in closest_idx]
+
+        results.append({
+            "topic_id": int(topic_id),
+            "size": len(titles),
+            "representative_titles": representative_titles
+        })
+
+    return sorted(results, key=lambda x: x["size"], reverse=True)
+
+
+# ===============================
+# Emerging topics
+# ===============================
+
+def compute_emerging_topics(papers: List[Dict], years_window: int = 1, n_clusters: int = 4):
 
     if not papers:
         return []
 
     years = sorted({p["year"] for p in papers})
-    if len(years) < recent_years:
+    if len(years) < 2:
         return []
 
-    split_year = years[-recent_years]
+    split_year = years[-years_window]
 
-    old_counter = Counter()
-    new_counter = Counter()
+    old_papers = [p for p in papers if p["year"] < split_year]
+    new_papers = [p for p in papers if p["year"] >= split_year]
 
-    for p in papers:
-        tokens = tokenize(p["title"])
-        if p["year"] < split_year:
-            old_counter.update(tokens)
-        else:
-            new_counter.update(tokens)
+    old_topics = compute_topics(old_papers, n_clusters)
+    new_topics = compute_topics(new_papers, n_clusters)
 
-    growth_scores = {}
+    if not old_topics or not new_topics:
+        return []
 
-    for term in new_counter:
-        old_freq = old_counter.get(term, 0)
-        new_freq = new_counter[term]
+    # сравнение по размеру
+    emerging = []
 
-        if new_freq >= 3:  # минимальный порог
-            growth = new_freq - old_freq
-            growth_scores[term] = growth
+    for new_topic in new_topics:
+        new_size = new_topic["size"]
 
-    sorted_terms = sorted(
-        growth_scores.items(),
-        key=lambda x: x[1],
-        reverse=True,
-    )
+        # ищем максимально похожий старый по representative_titles
+        old_size = 1
 
-    return [term for term, _ in sorted_terms[:top_n]]
+        for old_topic in old_topics:
+            old_size = max(old_size, old_topic["size"])
 
+        growth = new_size / old_size
+
+        if growth > 1.3 and new_size > 5:
+            emerging.append(new_topic)
+
+    return emerging
